@@ -132,7 +132,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if allowed := s.ops.IsAllowed(ctx, modPath); !allowed {
-		http.Error(w, "package is not whitelisted", http.StatusNotFound)
+		http.Error(w, "package is not whitelisted", http.StatusForbidden)
 		return
 	}
 	what := r.URL.Path[i+len("/@"):]
