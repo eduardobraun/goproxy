@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -44,12 +45,14 @@ var listen string
 var cacheDir string
 var proxyHost string
 var excludeHost string
+var whitelistFile string
 
 func init() {
 	flag.StringVar(&excludeHost, "exclude", "", "exclude host pattern")
 	flag.StringVar(&proxyHost, "proxy", "", "next hop proxy for go modules")
 	flag.StringVar(&cacheDir, "cacheDir", "", "go modules cache dir")
 	flag.StringVar(&listen, "listen", "0.0.0.0:8081", "service listen address")
+	flag.StringVar(&whitelistFile, "whitelist", "", "path to the whitelist file")
 	flag.Parse()
 
 	if os.Getenv("GIT_TERMINAL_PROMPT") == "" {
@@ -81,18 +84,39 @@ func main() {
 	}
 	downloadRoot = filepath.Join(list[0], "pkg/mod/cache/download")
 
+	rules := []*regexp.Regexp{}
+	if whitelistFile != "" {
+		b, err := ioutil.ReadFile(whitelistFile)
+		if err != nil {
+			log.Fatalf("could not load whitelist: %s", err.Error())
+		}
+
+		whitelist := strings.Split(string(b), "\n")
+		for l, w := range whitelist {
+			r, err := regexp.Compile("^" + w + "$")
+			if err != nil {
+				log.Fatalf("malformed whitelist on line [%d]: %s", l, err.Error())
+			}
+			rules = append(rules, r)
+		}
+	}
+
+	o := ops{
+		whiteList: rules,
+	}
+
 	var handle http.Handler
 	if proxyHost != "" {
 		log.Printf("ProxyHost %s\n", proxyHost)
 		if excludeHost != "" {
 			log.Printf("ExcludeHost %s\n", excludeHost)
 		}
-		handle = &logger{proxy.NewRouter(proxy.NewServer(new(ops)), &proxy.RouterOptions{
+		handle = &logger{proxy.NewRouter(proxy.NewServer(&o), &proxy.RouterOptions{
 			Pattern: excludeHost,
 			Proxy:   proxyHost,
 		})}
 	} else {
-		handle = &logger{proxy.NewServer(new(ops))}
+		handle = &logger{proxy.NewServer(&o)}
 	}
 	log.Fatal(http.ListenAndServe(listen, handle))
 }
@@ -133,10 +157,26 @@ func (l *logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // An ops is a proxy.ServerOps implementation.
-type ops struct{}
+type ops struct{
+	whiteList []*regexp.Regexp
+}
 
 func (*ops) NewContext(r *http.Request) (context.Context, error) {
 	return context.Background(), nil
+}
+func (o *ops) IsAllowed(ctx context.Context, path string) bool {
+	if len(o.whiteList) == 0 {
+		return true
+	}
+
+	for _, r := range o.whiteList {
+		if r.MatchString(path) {
+			log.Printf("whitelisting path: %s, allowed: %v", path, true)
+			return true
+		}
+	}
+	log.Printf("whitelisting path: %s, allowed: %v", path, false)
+	return false
 }
 func (*ops) List(ctx context.Context, mpath string) (proxy.File, error) {
 	escMod, err := module.EscapePath(mpath)
