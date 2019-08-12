@@ -23,8 +23,10 @@ import (
 type ServerOps interface {
 	// NewContext returns the context to use for the request r.
 	NewContext(r *http.Request) (context.Context, error)
-	// IsAllowed
-	IsAllowed(ctx context.Context, path string) bool
+	// Filter verifies if a module URL should be filtered by the proxy.
+	// The returned value should be true if the URL is allowed and false otherwise.
+	// This method can be used to implement both whitelists and blacklists.
+	Filter(ctx context.Context, path string) bool
 	// List, Latest, Info, GoMod, and Zip all return a File to be sent to a client.
 	// The File will be closed after its contents are sent.
 	// In the case of an error, if the error satisfies errors.Is(err, os.ErrNotFound),
@@ -131,8 +133,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if allowed := s.ops.IsAllowed(ctx, modPath); !allowed {
-		http.Error(w, "package is not whitelisted", http.StatusForbidden)
+	if allowed := s.ops.Filter(ctx, modPath); !allowed {
+		http.Error(w, "package was filtered by the proxy", http.StatusForbidden)
 		return
 	}
 	what := r.URL.Path[i+len("/@"):]

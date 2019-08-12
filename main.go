@@ -46,13 +46,15 @@ var cacheDir string
 var proxyHost string
 var excludeHost string
 var whitelistFile string
+var blacklistFile string
 
 func init() {
 	flag.StringVar(&excludeHost, "exclude", "", "exclude host pattern")
 	flag.StringVar(&proxyHost, "proxy", "", "next hop proxy for go modules")
 	flag.StringVar(&cacheDir, "cacheDir", "", "go modules cache dir")
 	flag.StringVar(&listen, "listen", "0.0.0.0:8081", "service listen address")
-	flag.StringVar(&whitelistFile, "whitelist", "", "path to the whitelist file")
+	flag.StringVar(&whitelistFile, "whitelist", "", "path to a file with the whitelist rules")
+	flag.StringVar(&blacklistFile, "blacklist", "", "path to a file with the blacklist rules")
 	flag.Parse()
 
 	if os.Getenv("GIT_TERMINAL_PROMPT") == "" {
@@ -62,6 +64,27 @@ func init() {
 	if os.Getenv("GIT_SSH") == "" && os.Getenv("GIT_SSH_COMMAND") == "" {
 		os.Setenv("GIT_SSH_COMMAND", "ssh -o ControlMaster=no")
 	}
+}
+
+func loadRules(file string) ([]*regexp.Regexp, error) {
+	rules := []*regexp.Regexp{}
+	if file != "" {
+		b, err := ioutil.ReadFile(file)
+		if err != nil {
+			return nil, err
+		}
+
+		whitelist := strings.Split(string(b), "\n")
+		for _, w := range whitelist {
+			r, err := regexp.Compile("^" + w + "$")
+			if err != nil {
+				return nil, err
+			}
+			rules = append(rules, r)
+		}
+	}
+
+	return rules, nil
 }
 
 func main() {
@@ -84,25 +107,19 @@ func main() {
 	}
 	downloadRoot = filepath.Join(list[0], "pkg/mod/cache/download")
 
-	rules := []*regexp.Regexp{}
-	if whitelistFile != "" {
-		b, err := ioutil.ReadFile(whitelistFile)
-		if err != nil {
-			log.Fatalf("could not load whitelist: %s", err.Error())
-		}
+	whiteRules, err := loadRules(whitelistFile)
+	if err != nil {
+		log.Fatalf("could not load whitelist: %s", err.Error())
+	}
 
-		whitelist := strings.Split(string(b), "\n")
-		for l, w := range whitelist {
-			r, err := regexp.Compile("^" + w + "$")
-			if err != nil {
-				log.Fatalf("malformed whitelist on line [%d]: %s", l, err.Error())
-			}
-			rules = append(rules, r)
-		}
+	blackRules, err := loadRules(blacklistFile)
+	if err != nil {
+		log.Fatalf("could not load blacklist: %s", err.Error())
 	}
 
 	o := ops{
-		whiteList: rules,
+		whiteList: whiteRules,
+		blackList: blackRules,
 	}
 
 	var handle http.Handler
@@ -159,24 +176,47 @@ func (l *logger) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // An ops is a proxy.ServerOps implementation.
 type ops struct{
 	whiteList []*regexp.Regexp
+	blackList []*regexp.Regexp
 }
 
 func (*ops) NewContext(r *http.Request) (context.Context, error) {
 	return context.Background(), nil
 }
-func (o *ops) IsAllowed(ctx context.Context, path string) bool {
-	if len(o.whiteList) == 0 {
-		return true
-	}
-
+func (o *ops) isWhitelisted(ctx context.Context, path string) bool{
 	for _, r := range o.whiteList {
 		if r.MatchString(path) {
-			log.Printf("whitelisting path: %s, allowed: %v", path, true)
 			return true
 		}
 	}
-	log.Printf("whitelisting path: %s, allowed: %v", path, false)
 	return false
+}
+func (o *ops) isBlacklisted(ctx context.Context, path string) bool{
+	for _, r := range o.blackList {
+		if r.MatchString(path) {
+			return true
+		}
+	}
+	return false
+}
+func (o *ops) Filter(ctx context.Context, path string) bool {
+	if len(o.whiteList) > 0 {
+		// If any blacklist is provided and the path is blacklisted, refuse
+		// the path.
+		if notallowed := o.isBlacklisted(ctx, path); notallowed {
+			return false
+		}
+	}
+
+	if len(o.whiteList) > 0 {
+		// If any whitelist is provided and the path is not whitelisted, refuse
+		// the path.
+		if allowed := o.isWhitelisted(ctx, path); !allowed {
+			return false
+		}
+	}
+
+	// Dont filter anything by default
+	return true
 }
 func (*ops) List(ctx context.Context, mpath string) (proxy.File, error) {
 	escMod, err := module.EscapePath(mpath)
