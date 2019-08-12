@@ -123,20 +123,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	i := strings.Index(r.URL.Path, "/@")
-	if i < 0 {
-		http.Error(w, "no such path", http.StatusNotFound)
-		return
-	}
-	modPath, err := module.UnescapePath(strings.TrimPrefix(r.URL.Path[:i], "/"))
+	modPathVer, _ := module.UnescapePath(strings.TrimPrefix(r.URL.Path, "/"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if allowed := s.ops.Filter(ctx, modPath); !allowed {
+	if allowed := s.ops.Filter(ctx, modPathVer); !allowed {
 		http.Error(w, "package was filtered by the proxy", http.StatusForbidden)
 		return
 	}
+	i := strings.Index(modPathVer, "/@")
+	if i < 0 {
+		http.Error(w, "no such path", http.StatusNotFound)
+		return
+	}
+	modPath = modPathVer[:i]
 	what := r.URL.Path[i+len("/@"):]
 	const (
 		contentTypeJSON   = "application/json"
